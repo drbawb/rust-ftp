@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::io::{Read, BufRead, BufReader, BufWriter, Cursor, Write, copy};
 #[cfg(feature = "secure")]
-use std::error::Error;
+use std::{error::Error, fmt};
 use std::net::{TcpStream, SocketAddr};
 use std::string::String;
 use std::str::FromStr;
@@ -12,7 +12,7 @@ use regex::Regex;
 use chrono::{DateTime, UTC};
 use chrono::offset::TimeZone;
 #[cfg(feature = "secure")]
-use openssl::ssl::{ SslContext, Ssl };
+use native_tls::{TlsConnector, TlsConnectorBuilder};
 use super::data_stream::DataStream;
 use super::status;
 use super::types::{FileType, FtpError, Line, Result};
@@ -30,11 +30,12 @@ lazy_static! {
 }
 
 /// Stream to interface with the FTP server. This interface is only for the command stream.
-#[derive(Debug)]
 pub struct FtpStream {
     reader: BufReader<DataStream>,
     #[cfg(feature = "secure")]
-    ssl_cfg: Option<SslContext>,
+    ssl_cfg: Option<TlsConnectorBuilder>,
+    #[cfg(feature = "secure")]
+    ssl_dom: Option<String>,
 }
 
 impl FtpStream {
@@ -61,6 +62,7 @@ impl FtpStream {
                 let mut ftp_stream = FtpStream {
                     reader: BufReader::new(DataStream::Tcp(stream)),
                     ssl_cfg: None,
+                    ssl_dom: None,
                 };
                 ftp_stream.read_response(status::READY)
                     .map(|_| ftp_stream)
@@ -89,16 +91,17 @@ impl FtpStream {
     /// let mut ftp_stream = ftp_stream.into_secure(ctx).unwrap();
     /// ```
     #[cfg(feature = "secure")]
-    pub fn into_secure(mut self, ssl_context: SslContext) -> Result<FtpStream> {
+    pub fn into_secure(mut self, ssl_dom: &str, ssl_context: TlsConnectorBuilder) -> Result<FtpStream> {
         // Ask the server to start securing data.
         try!(self.write_str("AUTH TLS\r\n"));
         try!(self.read_response(status::AUTH_OK));
-        let ssl_cfg = try!(Ssl::new(&ssl_context).map_err(|e| FtpError::SecureError(e.description().to_owned())));
-        let stream = try!(ssl_cfg.connect(self.reader.into_inner().into_tcp_stream()).map_err(|e| FtpError::SecureError(e.description().to_owned())));
+        let ssl_cfg = try!(ssl_context.build().map_err(|e| FtpError::SecureError(e.description().to_owned())));
+        let stream = try!(ssl_cfg.connect(ssl_dom, self.reader.into_inner().into_tcp_stream()).map_err(|e| FtpError::SecureError(e.description().to_owned())));
 
         let mut secured_ftp_tream = FtpStream {
             reader: BufReader::new(DataStream::Ssl(stream)),
-            ssl_cfg: Some(ssl_context)
+            ssl_cfg: Some(ssl_context),
+            ssl_dom: Some(ssl_dom.to_owned()),
         };
         // Set protection buffer size
         try!(secured_ftp_tream.write_str("PBSZ 0\r\n"));
@@ -140,6 +143,7 @@ impl FtpStream {
         let plain_ftp_stream = FtpStream {
             reader: BufReader::new(DataStream::Tcp(self.reader.into_inner().into_tcp_stream())),
             ssl_cfg: None,
+            ssl_dom: None,
         };
         Ok(plain_ftp_stream)
     }
@@ -161,13 +165,16 @@ impl FtpStream {
             .and_then(|addr| self.write_str(cmd).map(|_| addr))
             .and_then(|addr| TcpStream::connect(addr).map_err(|e| FtpError::ConnectionError(e)))
             .and_then(|stream| {
-                match self.ssl_cfg {
-                    Some(ref ssl) => {
-                        Ssl::new(ssl).unwrap().connect(stream)
+                match (&self.ssl_dom, &self.ssl_cfg) {
+                    (Some(ref dom), Some(ref ssl)) => {
+                        ssl.build().unwrap().connect(dom, stream)
                             .map(|stream| DataStream::Ssl(stream))
                             .map_err(|e| FtpError::SecureError(e.description().to_owned()))
                     },
-                    None => Ok(DataStream::Tcp(stream))
+
+                    (None, None) => Ok(DataStream::Tcp(stream)),
+                    _ => Err(FtpError::SecureError("invalid tls config state".to_owned())), 
+
                 }
             })
     }
