@@ -51,7 +51,7 @@ extern crate regex;
 extern crate chrono;
 
 #[cfg(feature = "secure")]
-pub extern crate openssl;
+pub extern crate native_tls;
 
 mod ftp;
 mod data_stream;

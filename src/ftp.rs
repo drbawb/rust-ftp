@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::io::{Read, BufRead, BufReader, BufWriter, Cursor, Write, copy};
 #[cfg(feature = "secure")]
-use std::error::Error;
+use std::{error::Error, fmt};
 use std::net::{TcpStream, SocketAddr};
 use std::string::String;
 use std::str::FromStr;
@@ -12,7 +12,7 @@ use regex::Regex;
 use chrono::{DateTime, UTC};
 use chrono::offset::TimeZone;
 #[cfg(feature = "secure")]
-use openssl::ssl::{ SslContext, Ssl };
+use native_tls::TlsConnector;
 use super::data_stream::DataStream;
 use super::status;
 use super::types::{FileType, FtpError, Line, Result};
@@ -29,12 +29,26 @@ lazy_static! {
     static ref SIZE_RE: Regex = Regex::new(r"\s+(\d+)\s*$").unwrap();
 }
 
+#[cfg(feature="secure")]
+struct TlsAdapter {
+	pub ssl_conn:   TlsConnector,
+	pub ssl_domain: String,
+}
+
+#[cfg(feature="secure")]
+impl fmt::Debug for TlsAdapter {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "TlsAdapter {{ .. {:p} .. }}", self)?;
+		Ok(())
+	}
+}
+
 /// Stream to interface with the FTP server. This interface is only for the command stream.
 #[derive(Debug)]
 pub struct FtpStream {
     reader: BufReader<DataStream>,
     #[cfg(feature = "secure")]
-    ssl_cfg: Option<SslContext>,
+	ssl_cfg: Option<TlsAdapter>,
 }
 
 impl FtpStream {
@@ -89,24 +103,29 @@ impl FtpStream {
     /// let mut ftp_stream = ftp_stream.into_secure(ctx).unwrap();
     /// ```
     #[cfg(feature = "secure")]
-    pub fn into_secure(mut self, ssl_context: SslContext) -> Result<FtpStream> {
+    pub fn into_secure(mut self, domain_name: &str, tls_config: TlsConnector) -> Result<FtpStream> {
         // Ask the server to start securing data.
         try!(self.write_str("AUTH TLS\r\n"));
         try!(self.read_response(status::AUTH_OK));
-        let ssl_cfg = try!(Ssl::new(&ssl_context).map_err(|e| FtpError::SecureError(e.description().to_owned())));
-        let stream = try!(ssl_cfg.connect(self.reader.into_inner().into_tcp_stream()).map_err(|e| FtpError::SecureError(e.description().to_owned())));
 
-        let mut secured_ftp_tream = FtpStream {
+		let stream = tls_config.connect(domain_name, self.reader.into_inner().into_tcp_stream())
+			.map_err(|e| FtpError::SecureError(e.description().to_owned()))?;
+
+        let mut secured_ftp_stream = FtpStream {
             reader: BufReader::new(DataStream::Ssl(stream)),
-            ssl_cfg: Some(ssl_context)
+            ssl_cfg: Some(TlsAdapter {
+				ssl_conn:   tls_config,
+				ssl_domain: domain_name.to_owned(),
+			}),
         };
+
         // Set protection buffer size
-        try!(secured_ftp_tream.write_str("PBSZ 0\r\n"));
-        try!(secured_ftp_tream.read_response(status::COMMAND_OK));
+        try!(secured_ftp_stream.write_str("PBSZ 0\r\n"));
+        try!(secured_ftp_stream.read_response(status::COMMAND_OK));
         // Change the level of data protectio to Private
-        try!(secured_ftp_tream.write_str("PROT P\r\n"));
-        try!(secured_ftp_tream.read_response(status::COMMAND_OK));
-        Ok(secured_ftp_tream)
+        try!(secured_ftp_stream.write_str("PROT P\r\n"));
+        try!(secured_ftp_stream.read_response(status::COMMAND_OK));
+        Ok(secured_ftp_stream)
     }
     
     /// Switch to insecure mode. If the connection is already
@@ -162,10 +181,10 @@ impl FtpStream {
             .and_then(|addr| TcpStream::connect(addr).map_err(|e| FtpError::ConnectionError(e)))
             .and_then(|stream| {
                 match self.ssl_cfg {
-                    Some(ref ssl) => {
-                        Ssl::new(ssl).unwrap().connect(stream)
-                            .map(|stream| DataStream::Ssl(stream))
-                            .map_err(|e| FtpError::SecureError(e.description().to_owned()))
+                    Some(ref tls_adapter) => {
+						tls_adapter.ssl_conn.connect(&tls_adapter.ssl_domain, stream)
+							.map(|stream| DataStream::Ssl(stream))
+							.map_err(|e| FtpError::SecureError(e.description().to_owned()))
                     },
                     None => Ok(DataStream::Tcp(stream))
                 }
