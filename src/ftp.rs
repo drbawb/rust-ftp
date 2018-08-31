@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::io::{Read, BufRead, BufReader, BufWriter, Cursor, Write, copy};
 #[cfg(feature = "secure")]
-use std::{error::Error, fmt};
+use std::error::Error;
 use std::net::{TcpStream, SocketAddr};
 use std::string::String;
 use std::str::FromStr;
@@ -12,7 +12,7 @@ use regex::Regex;
 use chrono::{DateTime, UTC};
 use chrono::offset::TimeZone;
 #[cfg(feature = "secure")]
-use native_tls::{TlsConnector, TlsConnectorBuilder};
+use native_tls::TlsConnector;
 use super::data_stream::DataStream;
 use super::status;
 use super::types::{FileType, FtpError, Line, Result};
@@ -33,7 +33,7 @@ lazy_static! {
 pub struct FtpStream {
     reader: BufReader<DataStream>,
     #[cfg(feature = "secure")]
-    ssl_cfg: Option<TlsConnectorBuilder>,
+    ssl_cfg: Option<TlsConnector>,
     #[cfg(feature = "secure")]
     ssl_dom: Option<String>,
 }
@@ -91,12 +91,11 @@ impl FtpStream {
     /// let mut ftp_stream = ftp_stream.into_secure(ctx).unwrap();
     /// ```
     #[cfg(feature = "secure")]
-    pub fn into_secure(mut self, ssl_dom: &str, ssl_context: TlsConnectorBuilder) -> Result<FtpStream> {
+    pub fn into_secure(mut self, ssl_dom: &str, ssl_context: TlsConnector) -> Result<FtpStream> {
         // Ask the server to start securing data.
         try!(self.write_str("AUTH TLS\r\n"));
         try!(self.read_response(status::AUTH_OK));
-        let ssl_cfg = try!(ssl_context.build().map_err(|e| FtpError::SecureError(e.description().to_owned())));
-        let stream = try!(ssl_cfg.connect(ssl_dom, self.reader.into_inner().into_tcp_stream()).map_err(|e| FtpError::SecureError(e.description().to_owned())));
+        let stream = try!(ssl_context.connect(ssl_dom, self.reader.into_inner().into_tcp_stream()).map_err(|e| FtpError::SecureError(e.description().to_owned())));
 
         let mut secured_ftp_tream = FtpStream {
             reader: BufReader::new(DataStream::Ssl(stream)),
@@ -167,7 +166,7 @@ impl FtpStream {
             .and_then(|stream| {
                 match (&self.ssl_dom, &self.ssl_cfg) {
                     (Some(ref dom), Some(ref ssl)) => {
-                        ssl.build().unwrap().connect(dom, stream)
+                        ssl.connect(dom, stream)
                             .map(|stream| DataStream::Ssl(stream))
                             .map_err(|e| FtpError::SecureError(e.description().to_owned()))
                     },
