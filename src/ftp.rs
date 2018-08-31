@@ -390,20 +390,18 @@ impl FtpStream {
 
     /// Execute a command which returns list of strings in a separate stream
     fn list_command(&mut self, cmd: Cow<'static, str>, open_code: u32, close_code: &[u32]) -> Result<Vec<String>> {
-        let mut lines: Vec<String> = Vec::new();
-        {
-            let mut data_stream = BufReader::new(try!(self.data_command(&cmd)));
-            try!(self.read_response_in(&[open_code, status::ALREADY_OPEN]));
+        let mut data_stream = BufReader::new(try!(self.data_command(&cmd)));
+        try!(self.read_response_in(&[open_code, status::ALREADY_OPEN]));
 
-            let mut line = String::new();
-            loop {
-                match data_stream.read_to_string(&mut line) {
-                    Ok(0) => break,
-                    Ok(_) => lines.extend(line.split("\r\n").into_iter().map(|s| String::from(s)).filter(|s| s.len() > 0)),
-                    Err(err) => return Err(FtpError::ConnectionError(err)),
-                };
-            }
-        }
+        let mut buf = String::new();
+        data_stream.read_to_string(&mut buf)
+            .map_err(|err| FtpError::ConnectionError(err))?;
+
+        let lines = buf.split("\r\n")
+            .filter(|s| s.len() > 0)
+            .map(|s| s.to_owned())
+            .collect();
+
 
         self.read_response_in(close_code).map(|_| lines)
     }
